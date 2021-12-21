@@ -12,6 +12,10 @@ import os.path as osp
 import pyclipper
 from shapely.geometry import Polygon
 
+
+min_text_size=8
+shrink_ratio=0.4
+
 #--------------------
 # maps
 #--------------------
@@ -70,3 +74,59 @@ def compute_distance(xs, ys, point_1, point_2):
 
     result[cosin < 0] = np.sqrt(np.fmin(square_distance_1, square_distance_2))[cosin < 0]
     return result
+
+#--------------------
+# data
+#--------------------
+def create_train_data(page):
+    # unique 
+    vals=[val for val in np.unique(page) if val>0]
+    h,w=page.shape
+    dim=(h,w)
+    gt = np.zeros(dim, dtype=np.float32)
+    mask = np.ones(dim, dtype=np.float32)
+    thresh_map = np.zeros(dim, dtype=np.float32)
+    thresh_mask = np.zeros(dim, dtype=np.float32)
+
+
+    for v in vals:
+        word_map=np.zeros_like(page)
+        word_map[page==v]=255
+        word_map=word_map.astype("uint8")
+        # polygon
+        contours, hiearchy = cv2.findContours(word_map, cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)
+        cont = np.vstack(contours[i] for i in range(len(contours)))
+        hull=cv2.convexHull(cont)
+        poly=np.squeeze(hull)
+        height = max(poly[:, 1]) - min(poly[:, 1])
+        width = max(poly[:, 0]) - min(poly[:, 0])
+        polygon = Polygon(poly)
+        
+        # generate gt and mask
+        if polygon.area < 1 or min(height, width) < min_text_size:
+            cv2.fillPoly(mask, poly.astype(np.int32)[np.newaxis, :, :], 0)
+            continue
+        else:
+            distance = polygon.area * (1 - np.power(shrink_ratio, 2)) / polygon.length
+            subject = [tuple(l) for l in poly]
+            padding = pyclipper.PyclipperOffset()
+            padding.AddPath(subject, pyclipper.JT_ROUND, pyclipper.ET_CLOSEDPOLYGON)
+            shrinked = padding.Execute(-distance)
+            if len(shrinked) == 0:
+                cv2.fillPoly(mask, poly.astype(np.int32)[np.newaxis, :, :], 0)
+                continue
+            else:
+                shrinked = np.array(shrinked[0]).reshape(-1, 2)
+                if shrinked.shape[0] > 2 and Polygon(shrinked).is_valid:
+                    cv2.fillPoly(gt, [shrinked.astype(np.int32)], 1)
+                else:
+                    cv2.fillPoly(mask, poly.astype(np.int32)[np.newaxis, :, :], 0)
+                    continue
+        # generate thresh map and thresh mask
+        draw_thresh_map(poly, thresh_map, thresh_mask, shrink_ratio=shrink_ratio)
+        
+    gt*=255
+    mask*=255
+    thresh_map*=255
+    thresh_mask*=255
+    return gt,mask,thresh_map,thresh_mask
