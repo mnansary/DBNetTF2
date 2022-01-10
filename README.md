@@ -2,7 +2,9 @@
 
 ```python
 Version: 0.0.1
-Authors: Md. Nazmuddoha Ansary,
+Authors: Md. Nazmuddoha Ansary 
+         Md. Rezwanul Haque
+         Md. Mobassir Hossain
 ```
 **LOCAL ENVIRONMENT**  
 ```python
