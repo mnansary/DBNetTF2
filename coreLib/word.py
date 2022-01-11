@@ -182,7 +182,6 @@ def create_word(iden,
         img=createHandwritenWords(df=df,comps=comps)
     else:
         img=createPrintedWords(comps=comps,fonts=fonts)
-
     # warp
     if random_exec(weights=[0.3,0.7]):
         img=warp_data(img)
@@ -197,6 +196,11 @@ def create_word(iden,
     img[img>0]=iden
     iden+=1
     img=np.squeeze(img)
+    # add space
+    h,_=img.shape
+    w=random.randint(config.word_min_space,config.word_max_space)
+    img=np.concatenate([img,np.zeros((h,w))],axis=1)           
+            
     return img,iden
 
 

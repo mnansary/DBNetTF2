@@ -18,7 +18,7 @@ import random
 # globals
 # ---------------------------------------------------------
 # number of images to store in a tfrecord
-DATA_NUM  = 256
+DATA_NUM  = 1024
 def create_dir(base,ext):
     '''
         creates a directory extending base
@@ -46,8 +46,9 @@ def to_tfrecord(image_paths,save_dir,r_num):
     tfrecord_name='{}.tfrecord'.format(r_num)
     # path
     tfrecord_path=os.path.join(save_dir,tfrecord_name)
+    print(tfrecord_path)
     with tf.io.TFRecordWriter(tfrecord_path) as writer:    
-        for image_path in image_paths:
+        for image_path in tqdm(image_paths):
             
             _paths={}
             data={}
