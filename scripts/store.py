@@ -13,11 +13,12 @@ from tqdm import tqdm
 from glob import glob 
 import cv2 
 import argparse
+import random
 # ---------------------------------------------------------
 # globals
 # ---------------------------------------------------------
 # number of images to store in a tfrecord
-DATA_NUM  = 128
+DATA_NUM  = 256
 def create_dir(base,ext):
     '''
         creates a directory extending base
@@ -94,6 +95,7 @@ def main(args):
     save_path =create_dir(args.save_dir,"tfrecords")
     save_path =create_dir(save_path,args.ds_iden)
     _paths=[img_path for img_path in tqdm(glob(os.path.join(args.data_dir,"*.*")))]
+    random.shuffle(_paths)
     genTFRecords(_paths,save_path)
 
 if __name__=="__main__":
