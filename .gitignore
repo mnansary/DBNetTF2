@@ -133,3 +133,4 @@ extra/*
 debug*
 extra.md 
 weights/*
+tests/*
