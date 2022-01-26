@@ -17,7 +17,7 @@ import numpy as np
 import matplotlib.pyplot as plt 
 import pyclipper
 from shapely.geometry import Polygon
-
+import copy
 #--------------------------helper---------------------------------
 
 #----------------------------------detector------------------------
@@ -44,6 +44,9 @@ class Detector(object):
             print(colored("#LOG     :","green"),colored("weights loaded!","blue"))
     
     def resize(self,size, image,pad):
+        '''
+            resizes an image to proper shape
+        '''
         h, w = image.shape[0],image.shape[1]
         scale_w = size / w
         scale_h = size / h
@@ -58,6 +61,9 @@ class Detector(object):
         return np.squeeze(padimg)
             
     def box_score_fast(self,bitmap, _box):
+        '''
+            box_score_fast: use bbox mean score as the mean score
+        '''
         h, w = bitmap.shape[:2]
         box = _box.copy()
         xmin = np.clip(np.floor(box[:, 0].min()).astype(np.int), 0, w - 1)
@@ -72,7 +78,10 @@ class Detector(object):
         return cv2.mean(bitmap[ymin:ymax + 1, xmin:xmax + 1], mask)[0]
 
 
-    def unclip(self,box, unclip_ratio=1.5):
+    def unclip(self,box, unclip_ratio=2.0):
+        '''
+            unclips a box
+        '''
         poly = Polygon(box)
         distance = poly.area * unclip_ratio / poly.length
         offset = pyclipper.PyclipperOffset()
@@ -81,6 +90,9 @@ class Detector(object):
         return expanded
 
     def get_mini_boxes(self,contour):
+        '''
+            extracts mini boxes
+        '''
         if not contour.size:
             return [], 0
         bounding_box = cv2.minAreaRect(contour)
@@ -104,42 +116,47 @@ class Detector(object):
             points[index_3], points[index_4]]
         return box, min(bounding_box[1])
 
-    def polygons_from_bitmap(self,pred, bitmap, dest_width, dest_height, max_candidates=500, box_thresh=0.5):
-        pred = pred[..., 0]
-        bitmap = bitmap[..., 0]
+    def boxes_from_bitmap(self, 
+                          pred, 
+                          bitmap, 
+                          dest_width, 
+                          dest_height,
+                          max_candidates=1000,
+                          box_thresh=0.5,
+                          min_size=3):
+        '''
+            extracts boxes from bitmaps
+        '''
         height, width = bitmap.shape
+        outs = cv2.findContours((bitmap * 255).astype(np.uint8), cv2.RETR_LIST,cv2.CHAIN_APPROX_SIMPLE)
+        if len(outs) == 3:
+            img, contours, _ = outs[0], outs[1], outs[2]
+        elif len(outs) == 2:
+            contours, _ = outs[0], outs[1]
+        num_contours = min(len(contours),max_candidates)
         boxes = []
         scores = []
-
-        contours, _ = cv2.findContours((bitmap * 255).astype(np.uint8), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-
-        for contour in contours[:max_candidates]:
-            epsilon = 0.001 * cv2.arcLength(contour, True)
-            approx = cv2.approxPolyDP(contour, epsilon, True)
-            points = approx.reshape((-1, 2))
-            
-            if points.shape[0] < 4:
+        for index in range(num_contours):
+            contour = contours[index]
+            points, sside = self.get_mini_boxes(contour)
+            if sside < min_size:
                 continue
+            points = np.array(points)
             score = self.box_score_fast(pred, points.reshape(-1, 2))
-            if box_thresh > score:
-                continue
-            if points.shape[0] > 2:
-                box = self.unclip(points, unclip_ratio=2.0)
-                if len(box) > 1:
-                    continue
-            else:
+            if score < box_thresh:
                 continue
 
-            box = box.reshape(-1, 2)
-            _, sside = self.get_mini_boxes(box.reshape((-1, 1, 2)))
-            if sside < 5:
+            box = self.unclip(points).reshape(-1, 1, 2)
+            box, sside = self.get_mini_boxes(box)
+            if sside < min_size + 2:
                 continue
+            box = np.array(box)
 
             box[:, 0] = np.clip(np.round(box[:, 0] / width * dest_width), 0, dest_width)
             box[:, 1] = np.clip(np.round(box[:, 1] / height * dest_height), 0, dest_height)
-            boxes.append(box.tolist())
+            boxes.append(box.astype(np.int16))
             scores.append(score)
-        return boxes, scores
+        return np.array(boxes, dtype=np.float32), scores
 
 
 
@@ -209,13 +226,102 @@ class Detector(object):
         db_model = K.Model(inputs=input_image,outputs=binarize_map)
         return db_model
     
+
+    def sorted_boxes(self,dt_boxes,dist=10):
+        """
+        Sort text boxes in order from top to bottom, left to right
+        args:
+            dt_boxes(array):detected text boxes with shape [4, 2]
+        return:
+            sorted boxes(array) with shape [4, 2]
+        """
+        num_boxes = dt_boxes.shape[0]
+        sorted_boxes = sorted(dt_boxes, key=lambda x: (x[0][1], x[0][0]))
+        _boxes = list(sorted_boxes)
+
+        for i in range(num_boxes - 1):
+            if abs(_boxes[i + 1][0][1] - _boxes[i][0][1]) < dist and (_boxes[i + 1][0][0] < _boxes[i][0][0]):
+                tmp = _boxes[i]
+                _boxes[i] = _boxes[i + 1]
+                _boxes[i + 1] = tmp
+        return _boxes
+
+    def get_rotate_crop_image(self,img, points):
+        # Use Green's theory to judge clockwise or counterclockwise
+        # author: biyanhua
+        d = 0.0
+        for index in range(-1, 3):
+            d += -0.5 * (points[index + 1][1] + points[index][1]) * (
+                        points[index + 1][0] - points[index][0])
+        if d < 0: # counterclockwise
+            tmp = np.array(points)
+            points[1], points[3] = tmp[3], tmp[1]
+
+        img_crop_width = int(
+            max(
+                np.linalg.norm(points[0] - points[1]),
+                np.linalg.norm(points[2] - points[3])))
+        img_crop_height = int(
+            max(
+                np.linalg.norm(points[0] - points[3]),
+                np.linalg.norm(points[1] - points[2])))
+        pts_std = np.float32([[0, 0], [img_crop_width, 0],
+                            [img_crop_width, img_crop_height],
+                            [0, img_crop_height]])
+        M = cv2.getPerspectiveTransform(points, pts_std)
+        dst_img = cv2.warpPerspective(
+            img,
+            M, (img_crop_width, img_crop_height),
+            borderMode=cv2.BORDER_REPLICATE,
+            flags=cv2.INTER_CUBIC)
+        dst_img_height, dst_img_width = dst_img.shape[0:2]
+        if dst_img_height * 1.0 / dst_img_width >= 1.5:
+            dst_img = np.rot90(dst_img)
+        return dst_img
+        
+    def padDetectionImage(self,img):
+        cfg={}
+            
+        h,w,d=img.shape
+        if h>w:
+            # pad widths
+            pad_width =h-w
+            # pads
+            pad =np.ones((h,pad_width,d))*255
+            # pad
+            img =np.concatenate([img,pad],axis=1)
+            # cfg
+            cfg["pad"]="width"
+            cfg["dim"]=w
+        
+        elif w>h:
+            # pad height
+            pad_height =w-h
+            # pads
+            pad =np.ones((pad_height,w,d))*255
+            # pad
+            img =np.concatenate([img,pad],axis=0)
+            # cfg
+            cfg["pad"]="height"
+            cfg["dim"]=h
+        else:
+            cfg=None
+        return img.astype("uint8"),cfg
+
     def detect(self,img,debug=False):
+        '''
+            extract locations and crops
+        '''
         if type(img)==str:
             img=cv2.imread(img)
         img=cv2.cvtColor(img,cv2.COLOR_BGR2RGB)
-        h_org,w_org,_=img.shape
+        
+        src=np.copy(img)
+        src,_=self.padDetectionImage(src)
+        h_src,w_src,_=src.shape
+        
         if debug:
-            plt.imshow(img)
+            plt.imshow(src)
             plt.show()
         
         data=self.resize(self.dim,img,0)
@@ -227,12 +333,24 @@ class Detector(object):
             plt.show()
         data=np.expand_dims(data,axis=0)
         pred=self.model.predict(data)[0]
+        pred=np.squeeze(pred)
+        bitmap = pred > 0.3
         if debug:
             plt.imshow(pred)
             plt.show()
-        bitmap = pred > 0.3
-        boxes, _ = self.polygons_from_bitmap(pred, bitmap, w_org, h_org)
-        #------------------------------
-        # TODO: Poly boxes to crops
-        #------------------------------
+            plt.imshow(bitmap)
+            plt.show()
+            
         
+        boxes, _ = self.boxes_from_bitmap(pred, bitmap, w_src,h_src)
+        
+        boxes=self.sorted_boxes(boxes)
+
+        crops=[]
+        for bno in range(len(boxes)):
+            tmp_box = copy.deepcopy(boxes[bno])
+            img_crop = self.get_rotate_crop_image(src,tmp_box)
+            crops.append(img_crop)
+
+        data={"loc":boxes,"crop":crops}
+        return data
